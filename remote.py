@@ -5,11 +5,18 @@ import sys
 import winsound
 import time
 import socket
+import urllib.request
 from zeroconf import Zeroconf, ServiceBrowser
 
 # ================= CONFIGURATION =================
-# TODO: UPDATE THIS PATH TO MATCH YOUR PC
-ADB_PATH = r"adb.exe"
+# Files required in the current folder
+ADB_EXE = "adb.exe"
+ADB_DLL = "AdbWinApi.dll"
+ADB_PATH = os.path.join(os.getcwd(), ADB_EXE)
+
+# URLs for download
+DLL_URL = "https://github.com/Abew-Tanjgag/universal-android-tv-remote-laptop-python/raw/refs/heads/main/AdbWinApi.dll"
+EXE_URL = "https://github.com/Abew-Tanjgag/universal-android-tv-remote-laptop-python/raw/refs/heads/main/adb.exe"
 
 # Sound Settings (Frequency in Hz, Duration in ms)
 BEEP_FREQ = 1000
@@ -33,6 +40,29 @@ APP_MAP = {
 shell_process = None
 found_devices = []
 
+# ================= FILE CHECKER =================
+def ensure_adb_files():
+    files_to_download = []
+    if not os.path.exists(ADB_EXE):
+        files_to_download.append((ADB_EXE, EXE_URL))
+    if not os.path.exists(ADB_DLL):
+        files_to_download.append((ADB_DLL, DLL_URL))
+
+    if files_to_download:
+        print("\n" + "!"*50)
+        print("  MISSING ADB FILES - DOWNLOADING...")
+        print("!"*50)
+        
+        for filename, url in files_to_download:
+            try:
+                print(f" [+] Downloading {filename}...")
+                urllib.request.urlretrieve(url, filename)
+                print(f" [✓] Success: {filename}")
+            except Exception as e:
+                print(f" [X] Error downloading {filename}: {e}")
+                sys.exit(1)
+        print("-" * 50)
+
 # ================= NETWORK SCANNER =================
 class TVListener:
     def remove_service(self, zc, type_, name): pass
@@ -42,11 +72,9 @@ class TVListener:
         try:
             info = zc.get_service_info(type_, name)
             if info and info.addresses:
-                # Convert bytes to standard IP string
                 ip = socket.inet_ntoa(info.addresses[0])
                 clean_name = name.replace("._androidtvremote2._tcp.local.", "")
                 
-                # Check if duplicate
                 for device in found_devices:
                     if device['ip'] == ip:
                         return
@@ -66,7 +94,7 @@ def scan_for_tvs():
     browser = ServiceBrowser(zeroconf, "_androidtvremote2._tcp.local.", listener)
     
     try:
-        time.sleep(5) # Scan duration
+        time.sleep(5) 
     finally:
         zeroconf.close()
     
@@ -81,7 +109,6 @@ def scan_for_tvs():
         print(f"✅ Auto-selecting: {device['name']} ({device['ip']})")
         return device['ip']
     
-    # If multiple found, ask user
     print("SELECT A TV:")
     for idx, dev in enumerate(found_devices):
         print(f" [{idx + 1}] {dev['name']} - {dev['ip']}")
@@ -127,12 +154,9 @@ def start_persistent_shell(tv_ip):
 
 def send_fast_command(cmd_string, tv_ip):
     global shell_process
-    
-    # Sound feedback
     try: winsound.Beep(BEEP_FREQ, BEEP_DUR)
     except: pass
 
-    # Restart shell if it crashed
     if shell_process is None or shell_process.poll() is not None:
         start_persistent_shell(tv_ip)
 
@@ -147,16 +171,16 @@ def print_menu():
     print("\n" + "="*50)
     print("      TURBO REMOTE v2 - READY")
     print("="*50)
-    print(" [W] Up       [E] Enter (Short)")
-    print(" [A] Left     [L] Enter (Long)")
-    print(" [S] Down     [P] Power (Sleep)")
-    print(" [D] Right    [K] Power (Restart/Menu)")
-    print(" [B] Back     [H] Home")
-    print(" [=] Vol Up   [-] Vol Dn   [M] Mute")
+    print(" [W] Up        [E] Enter (Short)")
+    print(" [A] Left      [L] Enter (Long)")
+    print(" [S] Down      [P] Power (Sleep)")
+    print(" [D] Right     [K] Power (Restart/Menu)")
+    print(" [B] Back      [H] Home")
+    print(" [=] Vol Up    [-] Vol Dn   [M] Mute")
     print("-" * 50)
     print(" APP LAUNCHERS:")
     for k, v in APP_MAP.items():
-        if int(k) % 2 != 0: # Print somewhat in columns (rough)
+        if int(k) % 2 != 0: 
             print(f" [{k}] {v[0]:<12}", end="")
         else:
             print(f" [{k}] {v[0]}")
@@ -164,26 +188,24 @@ def print_menu():
     print("="*50)
 
 def main():
+    # Check for ADB and DLL files first
+    ensure_adb_files()
+
     if not os.path.exists(ADB_PATH):
         print(f"ERROR: ADB not found at {ADB_PATH}")
-        print("Please edit the 'ADB_PATH' variable at the top of the script.")
         return
 
-    # 1. FIND TV
     target_ip = scan_for_tvs()
     if not target_ip:
         print("No valid IP provided. Exiting.")
         return
 
-    # 2. CONNECT ADB
     if not connect_adb(target_ip):
         return
 
-    # 3. START SHELL
     start_persistent_shell(target_ip)
     print_menu()
 
-    # 4. LOOP
     while True:
         if msvcrt.kbhit():
             key_byte = msvcrt.getch()
@@ -192,13 +214,11 @@ def main():
             except:
                 continue
 
-            # APP LAUNCHER SHORTCUTS
             if key in APP_MAP:
                 app_name, package = APP_MAP[key]
                 print(f"LAUNCHING: {app_name}")
                 send_fast_command(f"monkey -p {package} -c android.intent.category.LAUNCHER 1\n", target_ip)
 
-            # NAVIGATION
             elif key == 'w':
                 print("UP")
                 send_fast_command("input keyevent 19\n", target_ip)
@@ -212,7 +232,6 @@ def main():
                 print("RIGHT")
                 send_fast_command("input keyevent 22\n", target_ip)
             
-            # ACTIONS
             elif key == 'e':
                 print("ENTER")
                 send_fast_command("input keyevent 23\n", target_ip)
@@ -226,7 +245,6 @@ def main():
                 print("HOME")
                 send_fast_command("input keyevent 3\n", target_ip)
 
-            # POWER
             elif key == 'p':
                 print("POWER")
                 send_fast_command("input keyevent 26\n", target_ip)
@@ -234,7 +252,6 @@ def main():
                 print("POWER (LONG)")
                 send_fast_command("input keyevent --longpress 26\n", target_ip)
 
-            # AUDIO
             elif key == '=' or key == '+':
                 print("VOL +")
                 send_fast_command("input keyevent 24\n", target_ip)
@@ -245,7 +262,6 @@ def main():
                 print("MUTE")
                 send_fast_command("input keyevent 164\n", target_ip)
 
-            # QUIT
             elif key == 'q':
                 break
 
