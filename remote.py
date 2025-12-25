@@ -1,240 +1,256 @@
+import subprocess
+import msvcrt
 import os
 import sys
-import subprocess
+import winsound
 import time
-import asyncio
-import msvcrt
 import socket
-import datetime
-
-# --- 1. MAGIC AUTO-INSTALLER (Non-Tech Savvy Friendly) ---
-def install_and_restart(package):
-    print(f"📦 Installing missing component: {package}...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-
-required_packages = {
-    "androidtvremote2": "androidtvremote2",
-    "cryptography": "cryptography",
-    "zeroconf": "zeroconf"
-}
-
-restart_needed = False
-for lib, package in required_packages.items():
-    try:
-        __import__(lib)
-    except ImportError:
-        install_and_restart(package)
-        restart_needed = True
-
-if restart_needed:
-    print("✅ Installation complete! Restarting script...")
-    os.execv(sys.executable, ['python'] + sys.argv)
-
-# --- 2. LIBRARY IMPORTS (Now safe to import) ---
 from zeroconf import Zeroconf, ServiceBrowser
-from androidtvremote2 import AndroidTVRemote
-from cryptography import x509
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.x509.oid import NameOID
 
 # ================= CONFIGURATION =================
-CACHE_FILE = "last_ip.txt"
-CERT_FILE = "cert.pem"
-KEY_FILE = "key.pem"
-# =================================================
+# TODO: UPDATE THIS PATH TO MATCH YOUR PC
+ADB_PATH = r"adb.exe"
 
-# --- 3. HARDWARE KEY MAPPING (For Gboard/System) ---
-KEY_MAP = {
-    'a': 'KEYCODE_A', 'b': 'KEYCODE_B', 'c': 'KEYCODE_C', 'd': 'KEYCODE_D',
-    'e': 'KEYCODE_E', 'f': 'KEYCODE_F', 'g': 'KEYCODE_G', 'h': 'KEYCODE_H',
-    'i': 'KEYCODE_I', 'j': 'KEYCODE_J', 'k': 'KEYCODE_K', 'l': 'KEYCODE_L',
-    'm': 'KEYCODE_M', 'n': 'KEYCODE_N', 'o': 'KEYCODE_O', 'p': 'KEYCODE_P',
-    'q': 'KEYCODE_Q', 'r': 'KEYCODE_R', 's': 'KEYCODE_S', 't': 'KEYCODE_T',
-    'u': 'KEYCODE_U', 'v': 'KEYCODE_V', 'w': 'KEYCODE_W', 'x': 'KEYCODE_X',
-    'y': 'KEYCODE_Y', 'z': 'KEYCODE_Z',
-    '0': 'KEYCODE_0', '1': 'KEYCODE_1', '2': 'KEYCODE_2', '3': 'KEYCODE_3',
-    '4': 'KEYCODE_4', '5': 'KEYCODE_5', '6': 'KEYCODE_6', '7': 'KEYCODE_7',
-    '8': 'KEYCODE_8', '9': 'KEYCODE_9',
-    ' ': 'KEYCODE_SPACE', '-': 'KEYCODE_MINUS', '=': 'KEYCODE_EQUALS',
-    '.': 'KEYCODE_PERIOD', ',': 'KEYCODE_COMMA', '/': 'KEYCODE_SLASH', '\\': 'KEYCODE_BACKSLASH'
+# Sound Settings (Frequency in Hz, Duration in ms)
+BEEP_FREQ = 1000
+BEEP_DUR = 50 
+
+# APP SHORTCUTS MAP (Key -> (Name, Package))
+APP_MAP = {
+    '1': ("Netflix", "com.netflix.ninja"),
+    '2': ("YouTube", "com.google.android.youtube.tv"),
+    '3': ("Disney+", "com.disney.disneyplus"),
+    '4': ("Prime Video", "com.amazon.amazonvideo.livingroom"),
+    '5': ("Spotify", "com.spotify.tv.android"),
+    '6': ("Plex", "com.plexapp.android"),
+    '7': ("Kodi", "org.xbmc.kodi"),
+    '8': ("VLC", "org.videolan.vlc"),
+    '9': ("Steam Link", "com.valvesoftware.steamlink"),
+    '0': ("Send Files", "com.yablio.sendfilestotv")
 }
 
-# --- 4. AUTO-DISCOVERY LOGIC ---
+# Global variables
+shell_process = None
+found_devices = []
+
+# ================= NETWORK SCANNER =================
 class TVListener:
-    def __init__(self):
-        self.found_ip = None
-        self.found_name = None
     def remove_service(self, zc, type_, name): pass
     def update_service(self, zc, type_, name): pass
+
     def add_service(self, zc, type_, name):
-        if self.found_ip: return
-        info = zc.get_service_info(type_, name)
-        if info and info.addresses:
-            self.found_ip = socket.inet_ntoa(info.addresses[0])
-            self.found_name = name
-            print(f"✅ FOUND TV: {name} @ {self.found_ip}")
+        try:
+            info = zc.get_service_info(type_, name)
+            if info and info.addresses:
+                # Convert bytes to standard IP string
+                ip = socket.inet_ntoa(info.addresses[0])
+                clean_name = name.replace("._androidtvremote2._tcp.local.", "")
+                
+                # Check if duplicate
+                for device in found_devices:
+                    if device['ip'] == ip:
+                        return
 
-def get_tv_ip():
-    # Check cache first
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, 'r') as f:
-            cached_ip = f.read().strip()
-        if cached_ip:
-            print(f"🔄 Using saved TV IP: {cached_ip}")
-            return cached_ip
+                found_devices.append({'name': clean_name, 'ip': ip, 'port': info.port})
+                print(f"  [+] Found: {clean_name} @ {ip}")
+        except Exception as e:
+            pass
 
-    print("🔍 Scanning for Android TV on Wi-Fi (Please wait)...")
+def scan_for_tvs():
+    print("\n" + "="*50)
+    print("      SCANNING FOR ANDROID TVs (5s)...")
+    print("="*50)
+    
     zeroconf = Zeroconf()
     listener = TVListener()
     browser = ServiceBrowser(zeroconf, "_androidtvremote2._tcp.local.", listener)
     
-    # Scan for 15 seconds
-    for _ in range(30): 
-        if listener.found_ip: break
-        time.sleep(0.5)
+    try:
+        time.sleep(5) # Scan duration
+    finally:
+        zeroconf.close()
     
-    zeroconf.close()
+    print("-" * 50)
+    
+    if not found_devices:
+        print("⚠️  No TVs found automatically.")
+        return input(">>> Enter TV IP address manually: ").strip()
+    
+    if len(found_devices) == 1:
+        device = found_devices[0]
+        print(f"✅ Auto-selecting: {device['name']} ({device['ip']})")
+        return device['ip']
+    
+    # If multiple found, ask user
+    print("SELECT A TV:")
+    for idx, dev in enumerate(found_devices):
+        print(f" [{idx + 1}] {dev['name']} - {dev['ip']}")
+    
+    while True:
+        try:
+            selection = input(">>> Enter number: ")
+            index = int(selection) - 1
+            if 0 <= index < len(found_devices):
+                return found_devices[index]['ip']
+        except ValueError:
+            pass
+        print("Invalid selection.")
 
-    if listener.found_ip:
-        with open(CACHE_FILE, 'w') as f: f.write(listener.found_ip)
-        return listener.found_ip
+# ================= REMOTE CONTROL LOGIC =================
+
+def connect_adb(tv_ip):
+    print(f"\n--- Connecting to {tv_ip} ---")
+    subprocess.run([ADB_PATH, "disconnect"], stdout=subprocess.DEVNULL)
+    result = subprocess.run([ADB_PATH, "connect", tv_ip], capture_output=True, text=True)
+    
+    if "connected" in result.stdout:
+        print(f">>> SUCCESSFULLY Connected to {tv_ip}")
+        return True
     else:
-        print("❌ No TV found! Make sure Laptop and TV are on same Wi-Fi.")
-        input("Press Enter to exit...")
-        sys.exit(1)
+        print(f">>> FAILED to connect. Check IP: {tv_ip}")
+        print("    (Output: " + result.stdout.strip() + ")")
+        return False
 
-def generate_certificates():
-    if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE): return
-    print("Generating encryption keys...")
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, u"Laptop Remote")])
-    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key()).serial_number(x509.random_serial_number()).not_valid_before(datetime.datetime.utcnow()).not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=3650)).sign(key, hashes.SHA256(), default_backend()))
-    with open(KEY_FILE, "wb") as f: f.write(key.private_bytes(encoding=serialization.Encoding.PEM, format=serialization.PrivateFormat.TraditionalOpenSSL, encryption_algorithm=serialization.NoEncryption()))
-    with open(CERT_FILE, "wb") as f: f.write(cert.public_bytes(encoding=serialization.Encoding.PEM))
+def start_persistent_shell(tv_ip):
+    global shell_process
+    try:
+        shell_process = subprocess.Popen(
+            [ADB_PATH, "-s", tv_ip, "shell"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        return True
+    except Exception as e:
+        print(f"Error starting shell: {e}")
+        return False
 
-# --- 5. MAIN LOGIC ---
-async def main():
-    TV_IP = get_tv_ip()
-    generate_certificates()
+def send_fast_command(cmd_string, tv_ip):
+    global shell_process
     
-    print(f"Connecting to {TV_IP}...")
-    client = AndroidTVRemote("Laptop Remote", CERT_FILE, KEY_FILE, TV_IP)
+    # Sound feedback
+    try: winsound.Beep(BEEP_FREQ, BEEP_DUR)
+    except: pass
+
+    # Restart shell if it crashed
+    if shell_process is None or shell_process.poll() is not None:
+        start_persistent_shell(tv_ip)
 
     try:
-        await client.async_connect()
-        print("Connected.")
-    except Exception:
-        if not client.is_paired:
-            print("\n👋 HELLO! WE NEED TO CONNECT TO YOUR TV.")
-            print("1. Look at your TV screen right now.")
-            print("2. You should see a pairing code.")
-            await client.async_start_pairing()
-            code = input("👉 Type that code here and press ENTER: ")
-            await client.async_finish_pairing(code)
-            await client.async_connect()
+        if shell_process and shell_process.stdin:
+            shell_process.stdin.write(cmd_string.encode('utf-8'))
+            shell_process.stdin.flush()
+    except Exception as e:
+        print(f"Error sending: {e}")
 
-    keyboard_mode = False
-    use_software_injection = False
+def print_menu():
+    print("\n" + "="*50)
+    print("      TURBO REMOTE v2 - READY")
+    print("="*50)
+    print(" [W] Up       [E] Enter (Short)")
+    print(" [A] Left     [L] Enter (Long)")
+    print(" [S] Down     [P] Power (Sleep)")
+    print(" [D] Right    [K] Power (Restart/Menu)")
+    print(" [B] Back     [H] Home")
+    print(" [=] Vol Up   [-] Vol Dn   [M] Mute")
+    print("-" * 50)
+    print(" APP LAUNCHERS:")
+    for k, v in APP_MAP.items():
+        if int(k) % 2 != 0: # Print somewhat in columns (rough)
+            print(f" [{k}] {v[0]:<12}", end="")
+        else:
+            print(f" [{k}] {v[0]}")
+    print("\n [Q] Quit")
+    print("="*50)
 
-    print("\n✅ UNIVERSAL CONTROLLER READY!")
-    print("-------------------------------------------------------")
-    print(" 🎮 REMOTE MODE (Default):")
-    print("    [W/A/S/D] Navigate   [E] Enter    [B] Back")
-    print("    [L] Long Enter (Hold) [H] Home")
-    print("    [P] Power (Sleep)    [K] Power Menu (Restart)")
-    print("    [+/-] Volume         [M] Mute")
-    print("-------------------------------------------------------")
-    print(" ⌨️  KEYBOARD MODES:")
-    print("    [9] Hardware Keyboard (Best for Gboard)")
-    print("    [0] Software Injector (Best for Apps)")
-    print("    [`] Exit Keyboard Mode")
-    print("-------------------------------------------------------")
+def main():
+    if not os.path.exists(ADB_PATH):
+        print(f"ERROR: ADB not found at {ADB_PATH}")
+        print("Please edit the 'ADB_PATH' variable at the top of the script.")
+        return
 
+    # 1. FIND TV
+    target_ip = scan_for_tvs()
+    if not target_ip:
+        print("No valid IP provided. Exiting.")
+        return
+
+    # 2. CONNECT ADB
+    if not connect_adb(target_ip):
+        return
+
+    # 3. START SHELL
+    start_persistent_shell(target_ip)
+    print_menu()
+
+    # 4. LOOP
     while True:
         if msvcrt.kbhit():
+            key_byte = msvcrt.getch()
             try:
-                char_raw = msvcrt.getch()
-                try: char = char_raw.decode('utf-8').lower()
-                except: 
-                    if char_raw == b'\x1b': char = 'ESC'
-                    else: continue
-                
-                if char == 'q' and not keyboard_mode: break
+                key = key_byte.decode('utf-8').lower()
+            except:
+                continue
 
-                # === KEYBOARD MODE ===
-                if keyboard_mode:
-                    if char == 'ESC':
-                        client.send_key_command("BACK")
-                        print("\n[Hide]", end='', flush=True)
-                    elif char == '\r': 
-                        client.send_key_command("KEYCODE_ENTER")
-                        print("\n[Ent]", end='', flush=True)
-                    elif char == '\x08': 
-                        client.send_key_command("KEYCODE_DEL")
-                        print("⌫", end='', flush=True)
-                    elif char == '`': # Exit Key
-                         keyboard_mode = False
-                         print("\n[EXIT KEYBOARD]")
-                    else:
-                        if use_software_injection:
-                            client.send_text(char)
-                        else:
-                            if char in KEY_MAP: client.send_key_command(KEY_MAP[char])
-                        print(char, end='', flush=True)
+            # APP LAUNCHER SHORTCUTS
+            if key in APP_MAP:
+                app_name, package = APP_MAP[key]
+                print(f"LAUNCHING: {app_name}")
+                send_fast_command(f"monkey -p {package} -c android.intent.category.LAUNCHER 1\n", target_ip)
 
-                # === REMOTE MODE ===
-                else:
-                    if char == '9': keyboard_mode = True; use_software_injection = False; print("\n[HARDWARE KEYBOARD] (` to exit)"); continue
-                    if char == '0': keyboard_mode = True; use_software_injection = True; print("\n[SOFTWARE INJECTOR] (` to exit)"); continue
-                    
-                    # --- FULL NAVIGATION BLOCK ---
-                    if char == 'w': 
-                        client.send_key_command("DPAD_UP")
-                    elif char == 's': 
-                        client.send_key_command("DPAD_DOWN")
-                    elif char == 'a': 
-                        client.send_key_command("DPAD_LEFT")
-                    elif char == 'd': 
-                        client.send_key_command("DPAD_RIGHT")
-                    elif char == 'e': 
-                        client.send_key_command("DPAD_CENTER")
-                    
-                    # Long Press Enter (Context Menu)
-                    elif char == 'l':
-                        print("[Hold] ", end='', flush=True)
-                        client.send_key_command("DPAD_CENTER", direction="START_LONG")
-                        await asyncio.sleep(1.0)
-                        client.send_key_command("DPAD_CENTER", direction="END_LONG")
-                    
-                    elif char == 'b': 
-                        client.send_key_command("BACK")
-                    elif char == 'h': 
-                        client.send_key_command("HOME")
-                    elif char == 'p': 
-                        client.send_key_command("POWER")
-                    
-                    # Long Press Power (Restart Menu)
-                    elif char == 'k':
-                        print("[PwrMenu] ", end='', flush=True)
-                        client.send_key_command("POWER", direction="START_LONG")
-                        await asyncio.sleep(2.0)
-                        client.send_key_command("POWER", direction="END_LONG")
-                    
-                    # Volume Controls
-                    elif char == '=' or char == '+': 
-                        client.send_key_command("VOLUME_UP")
-                    elif char == '-': 
-                        client.send_key_command("VOLUME_DOWN")
-                    elif char == 'm': 
-                        client.send_key_command("MUTE")
+            # NAVIGATION
+            elif key == 'w':
+                print("UP")
+                send_fast_command("input keyevent 19\n", target_ip)
+            elif key == 's':
+                print("DOWN")
+                send_fast_command("input keyevent 20\n", target_ip)
+            elif key == 'a':
+                print("LEFT")
+                send_fast_command("input keyevent 21\n", target_ip)
+            elif key == 'd':
+                print("RIGHT")
+                send_fast_command("input keyevent 22\n", target_ip)
+            
+            # ACTIONS
+            elif key == 'e':
+                print("ENTER")
+                send_fast_command("input keyevent 23\n", target_ip)
+            elif key == 'l':
+                print("ENTER (LONG)")
+                send_fast_command("input keyevent --longpress 23\n", target_ip)
+            elif key == 'b':
+                print("BACK")
+                send_fast_command("input keyevent 4\n", target_ip)
+            elif key == 'h':
+                print("HOME")
+                send_fast_command("input keyevent 3\n", target_ip)
 
-            except Exception:
-                # Auto-reconnect silently if connection drops
-                try: await client.async_connect()
-                except: pass
-        await asyncio.sleep(0.01)
+            # POWER
+            elif key == 'p':
+                print("POWER")
+                send_fast_command("input keyevent 26\n", target_ip)
+            elif key == 'k':
+                print("POWER (LONG)")
+                send_fast_command("input keyevent --longpress 26\n", target_ip)
+
+            # AUDIO
+            elif key == '=' or key == '+':
+                print("VOL +")
+                send_fast_command("input keyevent 24\n", target_ip)
+            elif key == '-' or key == '_':
+                print("VOL -")
+                send_fast_command("input keyevent 25\n", target_ip)
+            elif key == 'm':
+                print("MUTE")
+                send_fast_command("input keyevent 164\n", target_ip)
+
+            # QUIT
+            elif key == 'q':
+                break
+
+    if shell_process:
+        shell_process.terminate()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
